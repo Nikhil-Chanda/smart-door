@@ -3,65 +3,91 @@ from imutils import paths
 import face_recognition
 import pickle
 import cv2
-import hashlib
+import numpy as np
+from tqdm import tqdm
 
-# Paths
 dataset_path = "dataset"
 encodings_path = "encodings.pickle"
-processed_log = "processed_images.txt"
 
-# Load previous encodings if they exist
-if os.path.exists(encodings_path):
-    print("[INFO] Loading existing encodings...")
-    with open(encodings_path, "rb") as f:
-        data = pickle.load(f)
-        knownEncodings = data["encodings"]
-        knownNames = data["names"]
-else:
-    knownEncodings = []
-    knownNames = []
+def preprocess_image(image):
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    equalized = clahe.apply(gray)
+    return cv2.cvtColor(equalized, cv2.COLOR_GRAY2RGB)
 
-# Load list of already processed images
-if os.path.exists(processed_log):
-    with open(processed_log, "r") as f:
-        processed_images = set(line.strip() for line in f.readlines())
-else:
-    processed_images = set()
+def load_data():
+    if os.path.exists(encodings_path):
+        print("[INFO] Loading existing encodings...")
+        with open(encodings_path, "rb") as f:
+            data = pickle.load(f)
+            encodings = [np.array(e, dtype=np.float32) for e in data["encodings"]]
+            names = data["names"]
+            image_paths = data.get("image_paths", [])
+            return encodings, names, image_paths
+    return [], [], []
 
-# Get image paths
-imagePaths = list(paths.list_images(dataset_path))
-new_images_processed = 0
+def save_data(encodings, names, image_paths):
+    tmp_path = encodings_path + ".tmp"
+    with open(tmp_path, "wb") as f:
+        pickle.dump({
+            "encodings": encodings,
+            "names": names,
+            "image_paths": image_paths
+        }, f)
+    os.replace(tmp_path, encodings_path)
 
-for (i, imagePath) in enumerate(imagePaths):
-    # Skip if already processed
-    if imagePath in processed_images:
-        continue
+def process_images():
+    knownEncodings, knownNames, knownImagePaths = load_data()
 
-    print(f"[INFO] Processing new image {i + 1}/{len(imagePaths)}: {imagePath}")
-    name = os.path.basename(os.path.dirname(imagePath))
-    image = cv2.imread(imagePath)
-    if image is None:
-        print(f"[WARNING] Skipping unreadable image: {imagePath}")
-        continue
+    current_imagePaths = set(paths.list_images(dataset_path))
 
-    rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    boxes = face_recognition.face_locations(rgb, model="hog")
-    encodings = face_recognition.face_encodings(rgb, boxes)
+    # Remove encodings for deleted images
+    new_encodings = []
+    new_names = []
+    new_image_paths = []
+    removed_count = 0
 
-    for encoding in encodings:
-        knownEncodings.append(encoding)
-        knownNames.append(name)
+    for enc, name, img_path in zip(knownEncodings, knownNames, knownImagePaths):
+        if img_path in current_imagePaths:
+            new_encodings.append(enc)
+            new_names.append(name)
+            new_image_paths.append(img_path)
+        else:
+            removed_count += 1
 
-    # Mark this image as processed
-    with open(processed_log, "a") as f:
-        f.write(f"{imagePath}\n")
+    print(f"[INFO] Removed {removed_count} encodings for deleted images.")
 
-    new_images_processed += 1
+    # Identify new images to process
+    encoded_set = set(new_image_paths)
+    images_to_process = list(current_imagePaths - encoded_set)
 
-# Save updated encodings
-with open(encodings_path, "wb") as f:
-    pickle.dump({"encodings": knownEncodings, "names": knownNames}, f)
+    print(f"[INFO] Processing {len(images_to_process)} new images.")
 
-print(f"\n✅ Incremental update complete.")
-print(f"New images processed: {new_images_processed}")
-print(f"Total people: {len(set(knownNames))}, Total encodings: {len(knownEncodings)}")
+    for imagePath in tqdm(images_to_process):
+        name = os.path.basename(os.path.dirname(imagePath))
+        image = cv2.imread(imagePath)
+        if image is None:
+            print(f"[WARNING] Cannot read {imagePath}. Skipping.")
+            continue
+
+        rgb = preprocess_image(image)
+        boxes = face_recognition.face_locations(rgb, model="cnn")
+        encodings = face_recognition.face_encodings(rgb, boxes)
+
+        if len(encodings) == 0:
+            print(f"[WARNING] No faces found in {imagePath}. Skipping.")
+            continue
+
+        for encoding in encodings:
+            new_encodings.append(np.array(encoding, dtype=np.float32))
+            new_names.append(name)
+            new_image_paths.append(imagePath)
+
+    save_data(new_encodings, new_names, new_image_paths)
+
+    print(f"\n✅ Update complete.")
+    print(f"Total images encoded: {len(new_image_paths)}")
+    print(f"Total unique people: {len(set(new_names))}")
+
+if __name__ == "__main__":
+    process_images()

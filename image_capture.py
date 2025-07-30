@@ -1,110 +1,114 @@
 import cv2
 import os
-from datetime import datetime
-from picamera2 import Picamera2
 import time
-import numpy as np
-import random
 
-# Change this to the name of the person you're photographing
-PERSON_NAME = input("New User Name : ")
-dataset_folder = os.path.dirname(__file__)
+def main():
+    # Step 1: Get user's name
+    person_name = input("Enter the name of the person: ").strip()
 
-def create_folder(name):
-    dataset_folder = os.path.join(dataset_folder, "dataset")
-    if not os.path.exists(dataset_folder):
-        os.makedirs(dataset_folder)
+    # Step 2: Create folder inside dataset/
+    dataset_path = "dataset"
+    person_path = os.path.join(dataset_path, person_name)
+    os.makedirs(person_path, exist_ok=True)
+    print(f"[INFO] Folder created at: {person_path}")
 
-    person_folder = os.path.join(dataset_folder, name)
-    if not os.path.exists(person_folder):
-        os.makedirs(person_folder)
-    return person_folder
+    # Step 3: Initialize webcam
+    cap = cv2.VideoCapture(0)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
+    if not cap.isOpened():
+        raise IOError("[ERROR] Cannot access webcam.")
 
-def random_brightness(img):
-    """ Slight random brightness adjustment """
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    value = random.randint(-40, 40)
-    hsv[:, :, 2] = cv2.add(hsv[:, :, 2], value)
-    return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+    print("[INFO] Camera warming up...")
+    time.sleep(2)
 
+    # Step 4: Load face detector
+    face_cascade = cv2.CascadeClassifier(
+        cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+    )
 
-def capture_photos(name):
-    folder = create_folder(name)
-
-    # Load Haar cascade for face detection
-    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-
-    # Initialize the camera
-    picam2 = Picamera2()
-    picam2.configure(picam2.create_preview_configuration(main={"format": 'XRGB8888', "size": (640, 480)}))
-    picam2.start()
-
-    time.sleep(2)  # Camera warm-up
-
-    photo_count = 0
+    # Step 5: Define prompts and parameters
     prompts = [
-        "Look straight at the camera.",
-        "Turn your head to the LEFT.",
-        "Turn your head to the RIGHT.",
-        "Smile slightly.",
-        "Keep a neutral face.",
-        "Lean a bit forward."
+        "Look straight (bright light)",
+        "Turn head left (bright light)",
+        "Turn head right (bright light)",
+        "Look up (bright light)",
+        "Look down (bright light)",
+        "Smile slightly (bright light)",
+        "Look straight (low light)",
+        "Turn head left (low light)",
+        "Turn head right (low light)",
+        "Look up (low light)",
+        "Look down (low light)",
+        "Smile slightly (low light)",
     ]
+    images_per_prompt = 5  # capture 5 images per prompt
+    max_images = len(prompts) * images_per_prompt
 
-    print(f"Taking photos for '{name}'. Press SPACE to capture, 'q' to quit.")
+    img_count = 0
+    prompt_index = 0
 
-    while True:
-        frame = picam2.capture_array()
-        display_frame = frame.copy()
+    # Timer variables to control capture speed without freezing frames
+    capture_interval = 1.0  # seconds between captures
+    last_capture_time = 0
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=5)
+    print("[INFO] Starting capture.")
+    print("[INSTRUCTION] Please capture all images under BRIGHT light first.")
+    print("[INSTRUCTION] Then dim lights or move to low-light area when prompted.")
+    print("[INSTRUCTION] Press 'q' anytime to quit.\n")
 
-        for (x, y, w, h) in faces:
-            cv2.rectangle(display_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-
-        cv2.imshow('Capture', display_frame)
-        key = cv2.waitKey(1) & 0xFF
-
-        if key == ord(' '):  # Capture face when spacebar is pressed
-            if len(faces) == 0:
-                print("No face detected. Try again.")
+    try:
+        while img_count < max_images:
+            ret, frame = cap.read()
+            if not ret:
+                print("[ERROR] Failed to grab frame.")
                 continue
 
-            for (x, y, w, h) in faces:
-                face_img = frame[y:y + h, x:x + w]
-                face_img = cv2.resize(face_img, (224, 224))
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            faces = face_cascade.detectMultiScale(gray, scaleFactor=1.3, minNeighbors=5)
 
-                # Save original
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = f"{name}_{timestamp}.jpg"
-                filepath = os.path.join(folder, filename)
-                cv2.imwrite(filepath, face_img)
-                photo_count += 1
-                print(f"[{photo_count}] Saved: {filepath}")
+            # Show current prompt on screen
+            current_prompt = prompts[prompt_index]
+            cv2.putText(frame, current_prompt, (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
 
-                # Save flipped version (data augmentation)
-                flipped = cv2.flip(face_img, 1)
-                flip_name = f"{name}_{timestamp}_flip.jpg"
-                cv2.imwrite(os.path.join(folder, flip_name), flipped)
+            # Save face images if detected and interval passed
+            if len(faces) > 0 and (time.time() - last_capture_time) > capture_interval:
+                x, y, w, h = faces[0]  # take first detected face
+                face_img = frame[y:y+h, x:x+w]
 
-                # Save brightness adjusted version (data augmentation)
-                bright = random_brightness(face_img)
-                bright_name = f"{name}_{timestamp}_bright.jpg"
-                cv2.imwrite(os.path.join(folder, bright_name), bright)
+                img_count += 1
+                img_file = os.path.join(person_path, f"{img_count}.jpg")
+                cv2.imwrite(img_file, face_img)
+                print(f"[INFO] ({img_count}/{max_images}) Saved: {img_file}")
 
-            # Prompt next variation
-            if photo_count % 3 == 0 and photo_count < len(prompts) * 3:
-                print(f"\n➡️ Next: {prompts[photo_count // 3 % len(prompts)]}\n")
+                # Draw rectangle around face
+                cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
 
-        elif key == ord('q'):
-            break
+                last_capture_time = time.time()
 
-    cv2.destroyAllWindows()
-    picam2.stop()
-    print(f"\n✅ Photo capture completed. {photo_count} faces saved for '{name}'.")
+                # Change prompt every 'images_per_prompt' images
+                if img_count % images_per_prompt == 0:
+                    prompt_index += 1
+                    if prompt_index == 6:
+                        print("\n[INSTRUCTION] Please dim the lights or move to a low-light area now.")
+                        print("Waiting 10 seconds for lighting adjustment...\n")
+                        time.sleep(10)  # give user time to adjust lighting
 
+            cv2.imshow("Capturing Faces", frame)
+
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                print("[INFO] Capture interrupted by user.")
+                break
+
+    except KeyboardInterrupt:
+        print("[INFO] Capture interrupted by keyboard.")
+
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
+        print(f"[INFO] Done. {img_count} images saved in '{person_path}'")
 
 if __name__ == "__main__":
-    capture_photos(PERSON_NAME)
+    main()
